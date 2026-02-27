@@ -1,0 +1,67 @@
+package structures
+
+import "fmt"
+
+type Blockchain struct {
+	head   *BlockchainNode
+	tail   *BlockchainNode
+	length int
+}
+
+func NewBlockchain() *Blockchain {
+	genesisBlock := GenerateGenesisBlock()
+	genesisNode := NewBlockchainNode(genesisBlock)
+
+	return &Blockchain{
+		genesisNode,
+		genesisNode,
+		1,
+	}
+}
+
+func (bc *Blockchain) AddBlock(bpm int) {
+	newBlock := NewBlock(bc.tail.m_block.Index+1, bpm, bc.tail.m_block.Hash)
+	newNode := NewBlockchainNode(newBlock)
+
+	newNode.prev_block = bc.tail
+	bc.tail.next_block = newNode
+	bc.tail = newNode
+	bc.length++
+}
+
+func (bc *Blockchain) GetLastBlock() *Block {
+	return bc.tail.m_block
+}
+
+func (bc *Blockchain) IsValid() bool {
+	current := bc.head
+
+	for current != nil {
+		if !current.m_block.IsValid() {
+			return false
+		}
+
+		if current.next_block != nil && current.next_block.m_block.PrevHash != current.m_block.Hash {
+			return false
+		}
+
+		current = current.next_block
+	}
+
+	return true
+}
+
+func (bc *Blockchain) Print() {
+	current := bc.head
+	for current != nil {
+		fmt.Printf("Index: %d, BPM: %d, Hash: %s\n",
+			current.m_block.Index,
+			current.m_block.BPM,
+			current.m_block.Hash)
+		current = current.next_block
+	}
+}
+
+func (bc *Blockchain) Length() int {
+	return bc.length
+}

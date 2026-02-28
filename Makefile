@@ -11,7 +11,7 @@ CMD_DAEMON_DIR = ./cmd/sbcd
 GOCMD = go
 GOBUILD = $(GOCMD) build
 GOCLEAN = $(GOCMD) clean
-GOTEST = $(GOCMD) test
+GOTEST = $(GOCMD) run ./cmd/tester
 GOGET = $(GOCMD) get
 
 .PHONY: all build clean test help cli daemon
@@ -37,7 +37,7 @@ clean:
 
 test:
 	@echo "Running tests..."
-	$(GOTEST) -v ./...
+	$(GOTEST)
 
 help:
 	@echo "Available commands:"

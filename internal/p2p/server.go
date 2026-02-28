@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
+	"KitsuneSemCalda/SBC/internal/blockchain"
 	"KitsuneSemCalda/SBC/internal/p2p/callbacks"
-	"KitsuneSemCalda/SBC/internal/structures"
 
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -16,16 +17,17 @@ import (
 
 type Server struct {
 	host       *Host
-	blockchain *structures.Blockchain
+	blockchain *blockchain.Blockchain
 	peers      map[peer.ID]*Peer
 
 	peer_callback  callbacks.PeerCallbacks
 	block_callback callbacks.BlockCallbacks
 
-	processedBlocks map[string]bool
+	processedMutex  sync.RWMutex
+	processedBlocks map[string]time.Time
 }
 
-func NewServer(cfg *Config, bc *structures.Blockchain) (*Server, error) {
+func NewServer(cfg *Config, bc *blockchain.Blockchain) (*Server, error) {
 	host, err := NewHost(cfg)
 	if err != nil {
 		return nil, err
@@ -35,19 +37,40 @@ func NewServer(cfg *Config, bc *structures.Blockchain) (*Server, error) {
 		host:            host,
 		blockchain:      bc,
 		peers:           make(map[peer.ID]*Peer),
-		processedBlocks: make(map[string]bool),
+		processedBlocks: make(map[string]time.Time),
 	}
 
 	s.host.SetStreamHandler(s.handleStream)
 
-	s.blockchain.Subscribe(func(block *structures.Block) {
-		if s.processedBlocks[block.Hash] {
+	s.blockchain.Subscribe(func(block *blockchain.Block) {
+		s.processedMutex.Lock()
+		if !s.processedBlocks[block.Hash].IsZero() {
+			s.processedMutex.Unlock()
 			return
 		}
+		s.processedBlocks[block.Hash] = time.Now()
+		s.processedMutex.Unlock()
 		s.BroadcastBlock(block)
 	})
 
+	go s.cleanupProcessedBlocks()
+
 	return s, nil
+}
+
+func (s *Server) cleanupProcessedBlocks() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		s.processedMutex.Lock()
+		for hash, timestamp := range s.processedBlocks {
+			if now.Sub(timestamp) > 10*time.Minute {
+				delete(s.processedBlocks, hash)
+			}
+		}
+		s.processedMutex.Unlock()
+	}
 }
 
 func (s *Server) handleStream(stream network.Stream) {
@@ -94,6 +117,9 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 		p.SendMessage(verAck)
 	case MsgVerAck:
 		log.Printf("Handshake completo com peer: %s", p.ID)
+		if p.BestHeight > s.blockchain.Length() {
+			s.sendGetBlocks(p)
+		}
 	case MsgBlock:
 		var payload BlockPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
@@ -102,7 +128,7 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 		}
 
 		// Convert payload to Block for callback
-		block := &structures.Block{
+		block := &blockchain.Block{
 			Index:     payload.Index,
 			Timestamp: payload.Timestamp,
 			BPM:       payload.BPM,
@@ -115,18 +141,81 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 		}
 
 		// Avoid adding block if it would trigger another broadcast (loop)
-		s.processedBlocks[block.Hash] = true
+		s.processedMutex.Lock()
+		s.processedBlocks[block.Hash] = time.Now()
+		s.processedMutex.Unlock()
 		s.blockchain.ProcessBlock(block)
 		log.Printf("Bloco #%d recebido e adicionado", payload.Index)
 	case MsgGetBlocks:
 		var payload GetBlocksPayload
-		json.Unmarshal(msg.Payload, &payload)
-		s.sendInv(p)
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			log.Printf("Error unmarshaling getblocks: %v", err)
+			return
+		}
+
+		blocks := s.blockchain.GetBlocksAfter(payload.StartHash, 500)
+		if len(blocks) > 0 {
+			var invVecs []InvVec
+			for _, b := range blocks {
+				invVecs = append(invVecs, InvVec{Type: "block", Hash: b.Hash})
+			}
+			inv := InvPayload{Count: len(invVecs), InvVec: invVecs}
+			msg, _ := NewMessage(MsgInv, inv)
+			p.SendMessage(msg)
+		}
+	case MsgInv:
+		var payload InvPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			log.Printf("Error unmarshaling inv: %v", err)
+			return
+		}
+
+		var missingVecs []InvVec
+		s.processedMutex.RLock()
+		for _, vec := range payload.InvVec {
+			if vec.Type == "block" && s.processedBlocks[vec.Hash].IsZero() {
+				missingVecs = append(missingVecs, vec)
+			}
+		}
+		s.processedMutex.RUnlock()
+
+		if len(missingVecs) > 0 {
+			msg, _ := NewMessage(MsgGetData, InvPayload{
+				Count:  len(missingVecs),
+				InvVec: missingVecs,
+			})
+			p.SendMessage(msg)
+		}
+	case MsgGetData:
+		var payload InvPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			log.Printf("Error unmarshaling getdata: %v", err)
+			return
+		}
+
+		for _, vec := range payload.InvVec {
+			if vec.Type == "block" {
+				block := s.blockchain.GetBlockByHash(vec.Hash)
+				if block != nil {
+					bPayload := BlockPayload{
+						Index:     block.Index,
+						Timestamp: block.Timestamp,
+						BPM:       block.BPM,
+						Hash:      block.Hash,
+						PrevHash:  block.PrevHash,
+					}
+					msg, _ := NewMessage(MsgBlock, bPayload)
+					p.SendMessage(msg)
+				}
+			}
+		}
 	}
 }
 
-func (s *Server) BroadcastBlock(block *structures.Block) {
-	s.processedBlocks[block.Hash] = true
+func (s *Server) BroadcastBlock(block *blockchain.Block) {
+	s.processedMutex.Lock()
+	s.processedBlocks[block.Hash] = time.Now()
+	s.processedMutex.Unlock()
 	payload := BlockPayload{
 		Index:     block.Index,
 		Timestamp: block.Timestamp,
@@ -150,6 +239,15 @@ func (s *Server) sendVersion(p *Peer) {
 		BestHeight: s.blockchain.Length(),
 	}
 	msg, _ := NewMessage(MsgVersion, payload)
+	p.SendMessage(msg)
+}
+
+func (s *Server) sendGetBlocks(p *Peer) {
+	lastBlock := s.blockchain.GetLastBlock()
+	payload := GetBlocksPayload{
+		StartHash: lastBlock.Hash,
+	}
+	msg, _ := NewMessage(MsgGetBlocks, payload)
 	p.SendMessage(msg)
 }
 
@@ -179,7 +277,24 @@ func (s *Server) ConnectToPeer(addr string) error {
 	if err != nil {
 		return err
 	}
-	return s.host.Connect(ctx, ma)
+
+	err = s.host.Connect(ctx, ma)
+	if err != nil {
+		return err
+	}
+
+	pi, err := peer.AddrInfoFromP2pAddr(ma)
+	if err != nil {
+		return err
+	}
+
+	stream, err := s.host.NewStream(ctx, pi.ID)
+	if err != nil {
+		return err
+	}
+
+	s.handleStream(stream)
+	return nil
 }
 
 func (s *Server) Start(ctx context.Context) error {

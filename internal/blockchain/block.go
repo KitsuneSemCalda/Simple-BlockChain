@@ -1,4 +1,4 @@
-package structures
+package blockchain
 
 import (
 	"crypto/sha256"
@@ -35,7 +35,14 @@ func NewBlock(index int, BPM int, prevHash string) *Block {
 }
 
 func GenerateGenesisBlock() *Block {
-	return NewBlock(0, 0, "0")
+	block := &Block{
+		Index:     0,
+		Timestamp: time.Unix(0, 0).UTC(),
+		BPM:       0,
+		PrevHash:  "0",
+	}
+	block.Hash = block.CalculateHash()
+	return block
 }
 
 func (b *Block) IsValid() bool {

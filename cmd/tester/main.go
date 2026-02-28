@@ -3,8 +3,9 @@ package main
 import (
 	"os"
 
-	_ "KitsuneSemCalda/SBC/internal/structures"
+	_ "KitsuneSemCalda/SBC/internal/blockchain"
 	_ "KitsuneSemCalda/SBC/internal/p2p"
+	_ "KitsuneSemCalda/SBC/internal/storage"
 	"github.com/caiolandgraf/gest/gest"
 )
 

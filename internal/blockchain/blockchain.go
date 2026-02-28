@@ -1,4 +1,4 @@
-package structures
+package blockchain
 
 import "fmt"
 
@@ -93,5 +93,42 @@ func (bc *Blockchain) GetAllBlocks() []*Block {
 		blocks = append(blocks, current.m_block)
 		current = current.next_block
 	}
+	return blocks
+}
+
+func (bc *Blockchain) GetBlockByHash(hash string) *Block {
+	current := bc.head
+	for current != nil {
+		if current.m_block.Hash == hash {
+			return current.m_block
+		}
+		current = current.next_block
+	}
+	return nil
+}
+
+func (bc *Blockchain) GetBlocksAfter(hash string, limit int) []*Block {
+	var blocks []*Block
+	current := bc.head
+	
+	if hash != "" {
+		for current != nil && current.m_block.Hash != hash {
+			current = current.next_block
+		}
+		
+		if current != nil {
+			current = current.next_block
+		} else {
+			current = bc.head
+		}
+	}
+	
+	count := 0
+	for current != nil && count < limit {
+		blocks = append(blocks, current.m_block)
+		current = current.next_block
+		count++
+	}
+	
 	return blocks
 }

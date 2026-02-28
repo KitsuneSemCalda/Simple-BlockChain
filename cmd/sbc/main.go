@@ -9,16 +9,16 @@ import (
 	"strconv"
 	"strings"
 
+	"KitsuneSemCalda/SBC/internal/blockchain"
 	"KitsuneSemCalda/SBC/internal/p2p"
-	"KitsuneSemCalda/SBC/internal/structures"
 )
 
 func main() {
-	blockchain := structures.NewBlockchain()
+	bc := blockchain.NewBlockchain()
 	cfg := p2p.DefaultConfig()
 	cfg.ParseFlags()
 
-	server, err := p2p.NewServer(cfg, blockchain)
+	server, err := p2p.NewServer(cfg, bc)
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
@@ -68,18 +68,18 @@ func main() {
 				fmt.Println("Error: BPM must be a number")
 				continue
 			}
-			blockchain.AddBlock(bpm)
+			bc.AddBlock(bpm)
 			fmt.Printf("Block added and broadcasting...\n")
 		case "print":
-			blockchain.Print()
+			bc.Print()
 		case "validate":
-			if blockchain.IsValid() {
+			if bc.IsValid() {
 				fmt.Println("Blockchain is valid!")
 			} else {
 				fmt.Println("Blockchain is INVALID!")
 			}
 		case "length":
-			fmt.Printf("Blockchain length: %d\n", blockchain.Length())
+			fmt.Printf("Blockchain length: %d\n", bc.Length())
 		case "quit", "exit":
 			fmt.Println("Goodbye!")
 			return

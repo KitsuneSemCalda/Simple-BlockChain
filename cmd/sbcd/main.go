@@ -7,16 +7,29 @@ import (
 	"os/signal"
 	"syscall"
 
+	"KitsuneSemCalda/SBC/internal/blockchain"
 	"KitsuneSemCalda/SBC/internal/p2p"
-	"KitsuneSemCalda/SBC/internal/structures"
+	"KitsuneSemCalda/SBC/internal/storage"
 )
 
 func main() {
-	blockchain := structures.NewBlockchain()
+	bc := blockchain.NewBlockchain()
 	cfg := p2p.DefaultConfig()
 	cfg.ParseFlags()
 
-	server, err := p2p.NewServer(cfg, blockchain)
+	// Initialize Store
+	store, err := storage.NewStore(cfg.DataDir)
+	if err != nil {
+		log.Fatalf("failed to open database: %v", err)
+	}
+	defer store.Close()
+
+	err = store.Load(bc)
+	if err != nil {
+		log.Fatalf("failed to load blockchain from store: %v", err)
+	}
+
+	server, err := p2p.NewServer(cfg, bc)
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}
@@ -39,6 +52,12 @@ func main() {
 
 	go func() {
 		<-stop
+		err := store.Save(bc)
+		if err != nil {
+			log.Printf("failed to save blockchain: %v", err)
+		} else {
+			log.Println("blockchain saved successfully")
+		}
 		cancel()
 	}()
 

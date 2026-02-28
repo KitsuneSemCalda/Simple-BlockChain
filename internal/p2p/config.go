@@ -10,12 +10,14 @@ import (
 
 type Config struct {
 	ListenAddr string
+	DataDir    string
 	BootNode   []string
 }
 
 func DefaultConfig() *Config {
 	return &Config{
 		ListenAddr: "/ip4/0.0.0.0/tcp/8333",
+		DataDir:    ".",
 		BootNode:   []string{},
 	}
 }
@@ -23,6 +25,7 @@ func DefaultConfig() *Config {
 func (c *Config) ParseFlags() {
 	var bootNodes string
 	flag.StringVar(&c.ListenAddr, "listen", c.ListenAddr, "Address to listen on")
+	flag.StringVar(&c.DataDir, "datadir", c.DataDir, "Directory to store blockchain data")
 	flag.StringVar(&bootNodes, "bootnode", "", "Comma-separated list of boot nodes")
 	flag.Parse()
 

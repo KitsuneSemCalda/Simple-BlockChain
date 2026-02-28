@@ -1,7 +1,7 @@
 package callbacks
 
-import "KitsuneSemCalda/SBC/internal/structures"
+import "KitsuneSemCalda/SBC/internal/blockchain"
 
 type BlockCallbacks interface {
-	OnBlockReceived(block *structures.Block)
+	OnBlockReceived(block *blockchain.Block)
 }

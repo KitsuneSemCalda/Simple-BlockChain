@@ -1,4 +1,4 @@
-package structures
+package blockchain
 
 import (
 	"github.com/caiolandgraf/gest/gest"

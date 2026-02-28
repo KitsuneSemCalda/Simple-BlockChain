@@ -2,10 +2,13 @@ package structures
 
 import "fmt"
 
+type BlockCallback func(*Block)
+
 type Blockchain struct {
-	head   *BlockchainNode
-	tail   *BlockchainNode
-	length int
+	head      *BlockchainNode
+	tail      *BlockchainNode
+	length    int
+	callbacks []BlockCallback
 }
 
 func NewBlockchain() *Blockchain {
@@ -13,20 +16,37 @@ func NewBlockchain() *Blockchain {
 	genesisNode := NewBlockchainNode(genesisBlock)
 
 	return &Blockchain{
-		genesisNode,
-		genesisNode,
-		1,
+		head:      genesisNode,
+		tail:      genesisNode,
+		length:    1,
+		callbacks: []BlockCallback{},
 	}
 }
 
 func (bc *Blockchain) AddBlock(bpm int) {
 	newBlock := NewBlock(bc.tail.m_block.Index+1, bpm, bc.tail.m_block.Hash)
-	newNode := NewBlockchainNode(newBlock)
+	bc.ProcessBlock(newBlock)
+}
 
+func (bc *Blockchain) ProcessBlock(block *Block) {
+	// Simple validation for now: only add if it's the next index
+	if block.Index != bc.tail.m_block.Index+1 {
+		return
+	}
+
+	newNode := NewBlockchainNode(block)
 	newNode.prev_block = bc.tail
 	bc.tail.next_block = newNode
 	bc.tail = newNode
 	bc.length++
+
+	for _, cb := range bc.callbacks {
+		cb(block)
+	}
+}
+
+func (bc *Blockchain) Subscribe(cb BlockCallback) {
+	bc.callbacks = append(bc.callbacks, cb)
 }
 
 func (bc *Blockchain) GetLastBlock() *Block {

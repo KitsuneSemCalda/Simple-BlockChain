@@ -65,3 +65,13 @@ func (bc *Blockchain) Print() {
 func (bc *Blockchain) Length() int {
 	return bc.length
 }
+
+func (bc *Blockchain) GetAllBlocks() []*Block {
+	var blocks []*Block
+	current := bc.head
+	for current != nil {
+		blocks = append(blocks, current.m_block)
+		current = current.next_block
+	}
+	return blocks
+}

@@ -12,10 +12,15 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
+type HostCallbacks interface {
+}
+
 type Host struct {
 	host   host.Host
 	ping   *ping.PingService
 	config *Config
+
+	callbacks HostCallbacks
 }
 
 const ProtocolID = "/sbc/1.0.0"
@@ -34,6 +39,10 @@ func NewHost(cfg *Config) (*Host, error) {
 		ping:   pingService,
 		config: cfg,
 	}, nil
+}
+
+func (h *Host) SetCallbacks(cb HostCallbacks) {
+	h.callbacks = cb
 }
 
 func (h *Host) ID() peer.ID {

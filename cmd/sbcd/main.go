@@ -1,7 +1,7 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"os"
 	"os/signal"
@@ -12,33 +12,41 @@ import (
 )
 
 func main() {
-	// Initialize the blockchain
-	_ = structures.NewBlockchain()
-	fmt.Println("Simple Blockchain Daemon starting...")
-
-	// Initialize the P2P host
+	blockchain := structures.NewBlockchain()
 	cfg := p2p.DefaultConfig()
-	host, err := p2p.NewHost(cfg)
+	cfg.ParseFlags()
+
+	server, err := p2p.NewServer(cfg, blockchain)
 	if err != nil {
-		log.Fatalf("failed to create host: %v", err)
+		log.Fatalf("failed to create server: %v", err)
 	}
 
-	fmt.Printf("Node ID: %s\n", host.ID().String())
-	fmt.Println("Listening on:")
-	for _, addr := range host.Addrs() {
-		fmt.Printf("- %s/p2p/%s\n", addr, host.ID().String())
+	for _, addr := range cfg.BootNode {
+		if addr == "" {
+			continue
+		}
+		err = server.ConnectToPeer(addr)
+		if err != nil {
+			log.Printf("Can't connect to server %s because %v", addr, err)
+		}
 	}
 
-	// Handle graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Println("Daemon is running. Press Ctrl+C to stop.")
-	<-stop
+	go func() {
+		<-stop
+		cancel()
+	}()
 
-	fmt.Println("Shutting down...")
-	if err := host.Close(); err != nil {
-		log.Printf("error closing host: %v", err)
+	log.Printf("Daemon Node ID: %s", server.GetHostID())
+	log.Printf("Listening on: %s", server.GetAddrs())
+
+	err = server.Start(ctx)
+	if err != nil {
+		log.Printf("Can't start server because %v", err)
 	}
-	fmt.Println("Goodbye!")
 }

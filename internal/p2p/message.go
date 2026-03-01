@@ -8,14 +8,18 @@ import (
 type MessageType string
 
 const (
-	MsgVersion   MessageType = "version"
-	MsgVerAck    MessageType = "verack"
-	MsgGetBlocks MessageType = "getblocks"
-	MsgBlock     MessageType = "block"
-	MsgInv       MessageType = "inv"
-	MsgGetData   MessageType = "getdata"
-	MsgPing      MessageType = "ping"
-	MsgPong      MessageType = "pong"
+	MsgVersion    MessageType = "version"
+	MsgVerAck     MessageType = "verack"
+	MsgGetBlocks  MessageType = "getblocks"
+	MsgBlock      MessageType = "block"
+	MsgInv        MessageType = "inv"
+	MsgGetData    MessageType = "getdata"
+	MsgPing       MessageType = "ping"
+	MsgPong       MessageType = "pong"
+	MsgGetPeers   MessageType = "getpeers"
+	MsgPeers      MessageType = "peers"
+	MsgFindBlock  MessageType = "findblock"
+	MsgBlockFound MessageType = "blockfound"
 )
 
 type Message struct {
@@ -57,6 +61,21 @@ type InvPayload struct {
 type InvVec struct {
 	Type string `json:"type"` // "block"
 	Hash string `json:"hash"`
+}
+
+type GetPeersPayload struct{}
+
+type PeersPayload struct {
+	Peers []string `json:"peers"`
+}
+
+type FindBlockPayload struct {
+	Hash string `json:"hash"`
+}
+
+type BlockFoundPayload struct {
+	Found bool          `json:"found"`
+	Block *BlockPayload `json:"block,omitempty"`
 }
 
 func NewMessage(msgType MessageType, payload any) (*Message, error) {

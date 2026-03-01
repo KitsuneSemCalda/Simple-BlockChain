@@ -1,0 +1,256 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"KitsuneSemCalda/SBC/internal/blockchain"
+	"KitsuneSemCalda/SBC/internal/p2p"
+	"KitsuneSemCalda/SBC/internal/storage"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+)
+
+var logger *slog.Logger
+
+const (
+	ValidationInterval = 30 * time.Second
+	SyncInterval       = 60 * time.Second
+	StatsInterval      = 10 * time.Second
+)
+
+type DaemonCallbacks struct {
+	blockchain *blockchain.Blockchain
+	server     *p2p.Server
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (c *DaemonCallbacks) OnNewPeer(id peer.ID) {
+	logger.Info("new peer connected", "peer", id.String()[:min(16, len(id.String()))])
+}
+
+func (c *DaemonCallbacks) OnDisconnect(id peer.ID) {
+	logger.Warn("peer disconnected", "peer", id.String()[:min(16, len(id.String()))])
+}
+
+func (c *DaemonCallbacks) OnPeerFound(info peer.AddrInfo) {
+	logger.Debug("peer found via discovery", "peer", info.ID.String()[:min(16, len(info.ID.String()))])
+}
+
+func (c *DaemonCallbacks) OnBlockReceived(block *blockchain.Block) {
+	hash := block.Hash
+	if len(hash) > 8 {
+		hash = hash[:8]
+	}
+	logger.Info("block received", "index", block.Index, "hash", hash)
+	logger.Debug("blockchain status", "length", c.blockchain.Length())
+}
+
+func initLogger() {
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}
+	// Use colored output for terminal
+	handler := &ColoredHandler{
+		Handler: slog.NewTextHandler(os.Stdout, opts),
+	}
+	logger = slog.New(handler)
+}
+
+type ColoredHandler struct {
+	slog.Handler
+}
+
+func (h *ColoredHandler) Handle(ctx context.Context, r slog.Record) error {
+	level := r.Level.String()
+	var colorCode string
+	switch r.Level {
+	case slog.LevelDebug:
+		colorCode = "\033[36m" // Cyan
+	case slog.LevelInfo:
+		colorCode = "\033[32m" // Green
+	case slog.LevelWarn:
+		colorCode = "\033[33m" // Yellow
+	case slog.LevelError:
+		colorCode = "\033[31m" // Red
+	}
+
+	fmt.Printf("%s[%s]\033[0m %s ", colorCode, level, r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		fmt.Printf("\033[90m%s=%v\033[0m ", a.Key, a.Value)
+		return true
+	})
+	fmt.Println()
+	return nil
+}
+
+func startMaintenance(ctx context.Context, bc *blockchain.Blockchain, server *p2p.Server) {
+	logger.Info("starting maintenance loops")
+	go validationTask(ctx, bc)
+	go syncTask(ctx, bc, server)
+	go statsTask(ctx, bc, server)
+}
+
+func validationTask(ctx context.Context, bc *blockchain.Blockchain) {
+	ticker := time.NewTicker(ValidationInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if bc.IsValid() {
+				logger.Debug("✓ chain validation: OK", "height", bc.Length())
+			} else {
+				logger.Error("✗ CRITICAL: chain is corrupted!")
+			}
+		}
+	}
+}
+
+func syncTask(ctx context.Context, bc *blockchain.Blockchain, server *p2p.Server) {
+	ticker := time.NewTicker(SyncInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			peers := server.GetPeers()
+			if len(peers) == 0 {
+				continue
+			}
+
+			var maxHeight int
+			var bestPeer peer.ID
+			for pID, p := range peers {
+				if p.BestHeight > maxHeight {
+					maxHeight = p.BestHeight
+					bestPeer = pID
+				}
+			}
+
+			if maxHeight > bc.Length() {
+				logger.Info("sync: peer has longer chain", 
+					"peer", bestPeer.String()[:8], 
+					"peer_height", maxHeight, 
+					"local_height", bc.Length())
+				server.RequestSync()
+			}
+		}
+	}
+}
+
+func statsTask(ctx context.Context, bc *blockchain.Blockchain, server *p2p.Server) {
+	ticker := time.NewTicker(StatsInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			peers := server.GetPeers()
+			lastBlock := bc.GetLastBlock()
+			logger.Info("stats update",
+				"height", bc.Length(),
+				"peers", len(peers),
+				"last_hash", lastBlock.Hash[:8])
+		}
+	}
+}
+
+func main() {
+	initLogger()
+	logger.Info("starting sbc daemon")
+
+	bc := blockchain.NewBlockchain()
+	cfg := p2p.DefaultConfig()
+	// Daemon should default to 8333
+	cfg.ListenAddr = "/ip4/0.0.0.0/tcp/8333"
+	cfg.ParseFlags()
+
+	store, err := storage.NewStore(cfg.DataDir)
+	if err != nil {
+		logger.Error("failed to open database", "error", err)
+		os.Exit(1)
+	}
+	defer store.Close()
+
+	err = store.Load(bc)
+	if err != nil {
+		logger.Error("failed to load blockchain from store", "error", err)
+		os.Exit(1)
+	}
+
+	server, err := p2p.NewServer(cfg, bc)
+	if err != nil {
+		logger.Error("failed to create server", "error", err)
+		os.Exit(1)
+	}
+
+	cbs := &DaemonCallbacks{blockchain: bc, server: server}
+	server.SetPeerCallback(cbs)
+	server.SetBlockCallback(cbs)
+
+	for _, addr := range cfg.BootNode {
+		if addr == "" {
+			continue
+		}
+		err = server.ConnectToPeer(addr)
+		if err != nil {
+			logger.Warn("can't connect to bootnode", "address", addr, "error", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	startMaintenance(ctx, bc, server)
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-stop
+		err := store.Save(bc)
+		if err != nil {
+			logger.Error("failed to save blockchain", "error", err)
+		} else {
+			logger.Info("blockchain saved successfully")
+		}
+		cancel()
+	}()
+
+	logger.Info("daemon initialized",
+		"peer_id", server.GetHostID(),
+		"listening", server.GetAddrs(),
+		"height", bc.Length())
+
+	announceData := map[string]string{
+		"peer_id": server.GetHostID(),
+		"addr":    "/ip4/0.0.0.0/tcp/8333",
+	}
+	announceBytes, _ := json.Marshal(announceData)
+	os.WriteFile("/tmp/sbc-daemon.json", announceBytes, 0644)
+	logger.Info("announce file written", "path", "/tmp/sbc-daemon.json")
+
+	err = server.Start(ctx)
+	if err != nil {
+		logger.Error("server error", "error", err)
+	}
+}

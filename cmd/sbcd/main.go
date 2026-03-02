@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"KitsuneSemCalda/SBC/internal/blockchain"
 	"KitsuneSemCalda/SBC/internal/p2p"
@@ -162,7 +161,7 @@ func main() {
 		"addr":    "/ip4/0.0.0.0/tcp/8333",
 	}
 	announceBytes, _ := json.Marshal(announceData)
-	os.WriteFile("/tmp/sbc-daemon.json", announceBytes, 0644)
+	os.WriteFile("/tmp/sbc-daemon.json", announceBytes, 0o644)
 	logger.Info("announce file written", "path", "/tmp/sbc-daemon.json")
 
 	err = server.Start(ctx)

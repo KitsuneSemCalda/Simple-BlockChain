@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -31,15 +29,15 @@ func min(a, b int) int {
 }
 
 func (c *DaemonCallbacks) OnNewPeer(id peer.ID) {
-	logger.Info("new peer connected", "peer", id.String()[:min(16, len(id.String()))])
+	p2p.Info("SBCD", "new peer connected: %s", id.String()[:min(16, len(id.String()))])
 }
 
 func (c *DaemonCallbacks) OnDisconnect(id peer.ID) {
-	logger.Warn("peer disconnected", "peer", id.String()[:min(16, len(id.String()))])
+	p2p.Warn("SBCD", "peer disconnected: %s", id.String()[:min(16, len(id.String()))])
 }
 
 func (c *DaemonCallbacks) OnPeerFound(info peer.AddrInfo) {
-	logger.Debug("peer found via discovery", "peer", info.ID.String()[:min(16, len(info.ID.String()))])
+	p2p.Debug("SBCD", "peer found via discovery: %s", info.ID.String()[:min(16, len(info.ID.String()))])
 }
 
 func (c *DaemonCallbacks) OnBlockReceived(block *blockchain.Block) {
@@ -90,8 +88,9 @@ func (h *ColoredHandler) Handle(ctx context.Context, r slog.Record) error {
 }
 
 func main() {
-	initLogger()
-	logger.Info("starting sbc daemon")
+	// Daemon defaults to Info level
+	p2p.SetLogLevel(p2p.LevelInfo)
+	p2p.Info("SBCD", "starting sbc daemon")
 
 	bc := blockchain.NewBlockchain()
 	cfg := p2p.DefaultConfig()
@@ -101,20 +100,20 @@ func main() {
 
 	store, err := storage.NewStore(cfg.DataDir)
 	if err != nil {
-		logger.Error("failed to open database", "error", err)
+		p2p.Error("SBCD", "failed to open database: %v", err)
 		os.Exit(1)
 	}
 	defer store.Close()
 
 	err = store.Load(bc)
 	if err != nil {
-		logger.Error("failed to load blockchain from store", "error", err)
+		p2p.Error("SBCD", "failed to load blockchain from store: %v", err)
 		os.Exit(1)
 	}
 
 	server, err := p2p.NewServer(cfg, bc)
 	if err != nil {
-		logger.Error("failed to create server", "error", err)
+		p2p.Error("SBCD", "failed to create server: %v", err)
 		os.Exit(1)
 	}
 
@@ -128,7 +127,7 @@ func main() {
 		}
 		err = server.ConnectToPeer(addr)
 		if err != nil {
-			logger.Warn("can't connect to bootnode", "address", addr, "error", err)
+			p2p.Warn("SBCD", "can't connect to bootnode %s: %v", addr, err)
 		}
 	}
 
@@ -144,17 +143,15 @@ func main() {
 		<-stop
 		err := store.Save(bc)
 		if err != nil {
-			logger.Error("failed to save blockchain", "error", err)
+			p2p.Error("SBCD", "failed to save blockchain: %v", err)
 		} else {
-			logger.Info("blockchain saved successfully")
+			p2p.Info("SBCD", "blockchain saved successfully")
 		}
 		cancel()
 	}()
 
-	logger.Info("daemon initialized",
-		"peer_id", server.GetHostID(),
-		"listening", server.GetAddrs(),
-		"height", bc.Length())
+	p2p.Info("SBCD", "daemon initialized: peer_id=%s listening=%v height=%d",
+		server.GetHostID(), server.GetAddrs(), bc.Length())
 
 	announceData := map[string]string{
 		"peer_id": server.GetHostID(),
@@ -166,6 +163,6 @@ func main() {
 
 	err = server.Start(ctx)
 	if err != nil {
-		logger.Error("server error", "error", err)
+		p2p.Error("SBCD", "server error: %v", err)
 	}
 }

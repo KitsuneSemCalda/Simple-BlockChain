@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -35,20 +34,26 @@ func main() {
 	cfg := p2p.DefaultConfig()
 	cfg.ParseFlags()
 
+	// Seed server usually wants to see what's happening
+	p2p.SetLogLevel(p2p.LevelInfo)
+
 	store, err := storage.NewStore(cfg.DataDir)
 	if err != nil {
-		log.Fatalf("failed to open database: %v", err)
+		p2p.Error("SEED", "failed to open database: %v", err)
+		os.Exit(1)
 	}
 	defer store.Close()
 
 	err = store.Load(bc)
 	if err != nil {
-		log.Fatalf("failed to load blockchain from store: %v", err)
+		p2p.Error("SEED", "failed to load blockchain from store: %v", err)
+		os.Exit(1)
 	}
 
 	server, err := p2p.NewServer(cfg, bc)
 	if err != nil {
-		log.Fatalf("failed to create server: %v", err)
+		p2p.Error("SEED", "failed to create server: %v", err)
+		os.Exit(1)
 	}
 
 	seed := &SeedServer{
@@ -79,12 +84,12 @@ func main() {
 		addr = ":" + env
 	}
 
-	log.Printf("Seed server starting on http://localhost%s", addr)
-	log.Printf("Seed endpoint: http://localhost%s/seeds", addr)
+	p2p.Info("SEED", "Seed server starting on http://localhost%s", addr)
+	p2p.Info("SEED", "Seed endpoint: http://localhost%s/seeds", addr)
 
 	go func() {
 		if err := http.ListenAndServe(addr, nil); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("seed server error: %v", err)
+			p2p.Error("SEED", "seed server error: %v", err)
 		}
 	}()
 
@@ -94,7 +99,7 @@ func main() {
 		}
 		err = server.ConnectToPeer(bootAddr)
 		if err != nil {
-			log.Printf("Can't connect to bootnode %s: %v", bootAddr, err)
+			p2p.Warn("SEED", "Can't connect to bootnode %s: %v", bootAddr, err)
 		}
 	}
 
@@ -108,15 +113,15 @@ func main() {
 		<-stop
 		err := store.Save(bc)
 		if err != nil {
-			log.Printf("failed to save blockchain: %v", err)
+			p2p.Error("SEED", "failed to save blockchain: %v", err)
 		} else {
-			log.Println("blockchain saved successfully")
+			p2p.Info("SEED", "blockchain saved successfully")
 		}
 		cancel()
 	}()
 
-	log.Printf("Daemon Node ID: %s", server.GetHostID())
-	log.Printf("Listening on: %s", server.GetAddrs())
+	p2p.Info("SEED", "Daemon Node ID: %s", server.GetHostID())
+	p2p.Info("SEED", "Listening on: %s", server.GetAddrs())
 
 	server.Start(ctx)
 }
@@ -161,9 +166,9 @@ func (s *SeedServer) handleSeeds(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(peers) == 0 {
-		log.Printf("[SEED] No peers available")
+		p2p.Debug("SEED", "No peers available")
 	} else {
-		log.Printf("[SEED] Serving %d peers", len(peers))
+		p2p.Debug("SEED", "Serving %d peers", len(peers))
 	}
 
 	json.NewEncoder(w).Encode(SeedResponse{Peers: peers})

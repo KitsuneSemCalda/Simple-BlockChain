@@ -4,7 +4,6 @@ import (
 	"github.com/caiolandgraf/gest/gest"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 )
 
 func init() {

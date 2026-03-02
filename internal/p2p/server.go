@@ -750,7 +750,7 @@ const (
 )
 
 func (s *Server) StartMaintenance(ctx context.Context) {
-	Info("Server", "Starting maintenance loops")
+	log.Println("Starting maintenance loops")
 	go s.validationTask(ctx)
 	go s.syncTask(ctx)
 	go s.statsTask(ctx)
@@ -766,7 +766,7 @@ func (s *Server) validationTask(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if !s.blockchain.IsValid() {
-				Error("Blockchain", "✗ CRITICAL: chain is corrupted!")
+				log.Println("✗ CRITICAL: chain is corrupted!")
 			}
 		}
 	}
@@ -796,7 +796,7 @@ func (s *Server) syncTask(ctx context.Context) {
 			}
 
 			if maxHeight > s.blockchain.Length() {
-				Info("Sync", "peer %s has longer chain (%d vs %d)",
+				log.Printf("Sync: peer %s has longer chain (%d vs %d)",
 					bestPeer.String()[:8], maxHeight, s.blockchain.Length())
 				s.RequestSync()
 			}
@@ -815,7 +815,7 @@ func (s *Server) statsTask(ctx context.Context) {
 		case <-ticker.C:
 			peers := s.GetPeers()
 			lastBlock := s.blockchain.GetLastBlock()
-			Info("Stats", "height=%d, peers=%d, last_hash=%s",
+			log.Printf("Stats update: height=%d, peers=%d, last_hash=%s",
 				s.blockchain.Length(), len(peers), lastBlock.Hash[:8])
 		}
 	}

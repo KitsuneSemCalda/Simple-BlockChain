@@ -14,6 +14,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
+var logger *slog.Logger
+
 type DaemonCallbacks struct {
 	blockchain *blockchain.Blockchain
 	server     *p2p.Server
@@ -43,8 +45,46 @@ func (c *DaemonCallbacks) OnBlockReceived(block *blockchain.Block) {
 	if len(hash) > 8 {
 		hash = hash[:8]
 	}
-	p2p.Info("SBCD", "block received: index=%d hash=%s", block.Index, hash)
-	p2p.Debug("SBCD", "blockchain status: length=%d", c.blockchain.Length())
+	logger.Info("block received", "index", block.Index, "hash", hash)
+	logger.Debug("blockchain status", "length", c.blockchain.Length())
+}
+
+func initLogger() {
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}
+	// Use colored output for terminal
+	handler := &ColoredHandler{
+		Handler: slog.NewTextHandler(os.Stdout, opts),
+	}
+	logger = slog.New(handler)
+}
+
+type ColoredHandler struct {
+	slog.Handler
+}
+
+func (h *ColoredHandler) Handle(ctx context.Context, r slog.Record) error {
+	level := r.Level.String()
+	var colorCode string
+	switch r.Level {
+	case slog.LevelDebug:
+		colorCode = "\033[36m" // Cyan
+	case slog.LevelInfo:
+		colorCode = "\033[32m" // Green
+	case slog.LevelWarn:
+		colorCode = "\033[33m" // Yellow
+	case slog.LevelError:
+		colorCode = "\033[31m" // Red
+	}
+
+	fmt.Printf("%s[%s]\033[0m %s ", colorCode, level, r.Message)
+	r.Attrs(func(a slog.Attr) bool {
+		fmt.Printf("\033[90m%s=%v\033[0m ", a.Key, a.Value)
+		return true
+	})
+	fmt.Println()
+	return nil
 }
 
 func main() {
@@ -119,7 +159,7 @@ func main() {
 	}
 	announceBytes, _ := json.Marshal(announceData)
 	os.WriteFile("/tmp/sbc-daemon.json", announceBytes, 0o644)
-	p2p.Info("SBCD", "announce file written to /tmp/sbc-daemon.json")
+	logger.Info("announce file written", "path", "/tmp/sbc-daemon.json")
 
 	err = server.Start(ctx)
 	if err != nil {

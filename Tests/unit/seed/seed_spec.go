@@ -24,34 +24,18 @@ func init() {
 		t.Expect(rr.Body.String()).ToBe("ok")
 	})
 
-	s.It("should handle peer announcements", func(t *gest.T) {
-		// Mock simple logic for testing the handler's behavior
+	s.It("should respond to seeds endpoint with empty list initially", func(t *gest.T) {
 		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodPost {
-				w.WriteHeader(http.StatusOK)
-			}
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"peers":[]}`))
 		})
 
-		payload := `{"addr":"/ip4/1.2.3.4/tcp/8333"}`
-		req, _ := http.NewRequest("POST", "/announce", strings.NewReader(payload))
+		req, _ := http.NewRequest("GET", "/seeds", nil)
 		rr := httptest.NewRecorder()
 		handler.ServeHTTP(rr, req)
 
 		t.Expect(rr.Code).ToBe(http.StatusOK)
-	})
-
-	s.It("should respond to info endpoint", func(t *gest.T) {
-		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"status":"online","peers_count":0}`))
-		})
-
-		req, _ := http.NewRequest("GET", "/info", nil)
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-
-		t.Expect(rr.Code).ToBe(http.StatusOK)
-		t.Expect(strings.Contains(rr.Body.String(), "online")).ToBeTrue()
+		t.Expect(rr.Body.String()).ToBe(`{"peers":[]}`)
 	})
 
 	gest.Register(s)

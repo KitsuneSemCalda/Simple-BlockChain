@@ -26,7 +26,6 @@ func init() {
 		t.Expect(cfg.DiscoveryPort).ToBe(9999)
 	})
 
-
 	s.It("should handle bootstrap nodes from environment variable", func(t *gest.T) {
 		os.Setenv("SBC_BOOTNODES", "node1,node2")
 		defer os.Unsetenv("SBC_BOOTNODES")

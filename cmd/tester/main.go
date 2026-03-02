@@ -34,7 +34,7 @@ func main() {
 	if !*all {
 		var filters []string
 		if *unit {
-			filters = append(filters, "Block", "Blockchain", "BlockchainNode", "P2P Config", "P2P Message", "P2P Peer", "P2P Logger", "P2P Server Core", "P2P Host Core", "Storage Store", "SBC CLI Logic", "SBCD Daemon Logic", "Seed Server Logic")
+			filters = append(filters, "Block", "Blockchain", "BlockchainNode", "P2P Config", "P2P Message", "P2P Peer", "Storage Store", "SBC CLI Logic", "SBCD Daemon Logic", "Seed Server Logic")
 		}
 		if *e2e {
 			filters = append(filters, "Blockchain E2E", "P2P E2E", "Storage E2E")

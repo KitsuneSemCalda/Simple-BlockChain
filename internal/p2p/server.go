@@ -32,6 +32,9 @@ type Server struct {
 
 	processedMutex  sync.RWMutex
 	processedBlocks map[string]time.Time
+
+	failedMutex sync.RWMutex
+	failedPeers map[string]time.Time
 }
 
 func NewServer(cfg *Config, bc *blockchain.Blockchain) (*Server, error) {
@@ -40,6 +43,7 @@ func NewServer(cfg *Config, bc *blockchain.Blockchain) (*Server, error) {
 		peers:           make(map[peer.ID]*Peer),
 		config:          cfg,
 		processedBlocks: make(map[string]time.Time),
+		failedPeers:     make(map[string]time.Time),
 	}
 
 	host, err := NewHost(cfg, s)
@@ -67,8 +71,24 @@ func NewServer(cfg *Config, bc *blockchain.Blockchain) (*Server, error) {
 	})
 
 	go s.cleanupProcessedBlocks()
+	go s.cleanupFailedPeers()
 
 	return s, nil
+}
+
+func (s *Server) cleanupFailedPeers() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		s.failedMutex.Lock()
+		for addr, timestamp := range s.failedPeers {
+			if now.Sub(timestamp) > 10*time.Minute {
+				delete(s.failedPeers, addr)
+			}
+		}
+		s.failedMutex.Unlock()
+	}
 }
 
 func (s *Server) cleanupProcessedBlocks() {
@@ -411,6 +431,14 @@ func (s *Server) OnPeerFound(pi peer.AddrInfo) {
 }
 
 func (s *Server) ConnectToPeer(addr string) error {
+	s.failedMutex.RLock()
+	lastFail, exists := s.failedPeers[addr]
+	if exists && time.Since(lastFail) < 1*time.Minute {
+		s.failedMutex.RUnlock()
+		return nil
+	}
+	s.failedMutex.RUnlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -421,6 +449,9 @@ func (s *Server) ConnectToPeer(addr string) error {
 
 	err = s.host.Connect(ctx, ma)
 	if err != nil {
+		s.failedMutex.Lock()
+		s.failedPeers[addr] = time.Now()
+		s.failedMutex.Unlock()
 		return err
 	}
 
@@ -710,5 +741,83 @@ func (s *Server) fetchSeedsFromHTTP(seedURL string) {
 		s.handleStream(stream)
 		fmt.Printf("[HTTP SEED] Connected to peer: %s\n", p.Addr)
 		return
+	}
+}
+
+const (
+	ValidationInterval = 30 * time.Second
+	SyncInterval       = 60 * time.Second
+	StatsInterval      = 10 * time.Second
+)
+
+func (s *Server) StartMaintenance(ctx context.Context) {
+	log.Println("Starting maintenance loops")
+	go s.validationTask(ctx)
+	go s.syncTask(ctx)
+	go s.statsTask(ctx)
+}
+
+func (s *Server) validationTask(ctx context.Context) {
+	ticker := time.NewTicker(ValidationInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !s.blockchain.IsValid() {
+				log.Println("✗ CRITICAL: chain is corrupted!")
+			}
+		}
+	}
+}
+
+func (s *Server) syncTask(ctx context.Context) {
+	ticker := time.NewTicker(SyncInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			peers := s.GetPeers()
+			if len(peers) == 0 {
+				continue
+			}
+
+			var maxHeight int
+			var bestPeer peer.ID
+			for pID, p := range peers {
+				if p.BestHeight > maxHeight {
+					maxHeight = p.BestHeight
+					bestPeer = pID
+				}
+			}
+
+			if maxHeight > s.blockchain.Length() {
+				log.Printf("Sync: peer %s has longer chain (%d vs %d)",
+					bestPeer.String()[:8], maxHeight, s.blockchain.Length())
+				s.RequestSync()
+			}
+		}
+	}
+}
+
+func (s *Server) statsTask(ctx context.Context) {
+	ticker := time.NewTicker(StatsInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			peers := s.GetPeers()
+			lastBlock := s.blockchain.GetLastBlock()
+			log.Printf("Stats update: height=%d, peers=%d, last_hash=%s",
+				s.blockchain.Length(), len(peers), lastBlock.Hash[:8])
+		}
 	}
 }

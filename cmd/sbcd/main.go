@@ -96,84 +96,6 @@ func (h *ColoredHandler) Handle(ctx context.Context, r slog.Record) error {
 	return nil
 }
 
-func startMaintenance(ctx context.Context, bc *blockchain.Blockchain, server *p2p.Server) {
-	logger.Info("starting maintenance loops")
-	go validationTask(ctx, bc)
-	go syncTask(ctx, bc, server)
-	go statsTask(ctx, bc, server)
-}
-
-func validationTask(ctx context.Context, bc *blockchain.Blockchain) {
-	ticker := time.NewTicker(ValidationInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if bc.IsValid() {
-				logger.Debug("✓ chain validation: OK", "height", bc.Length())
-			} else {
-				logger.Error("✗ CRITICAL: chain is corrupted!")
-			}
-		}
-	}
-}
-
-func syncTask(ctx context.Context, bc *blockchain.Blockchain, server *p2p.Server) {
-	ticker := time.NewTicker(SyncInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			peers := server.GetPeers()
-			if len(peers) == 0 {
-				continue
-			}
-
-			var maxHeight int
-			var bestPeer peer.ID
-			for pID, p := range peers {
-				if p.BestHeight > maxHeight {
-					maxHeight = p.BestHeight
-					bestPeer = pID
-				}
-			}
-
-			if maxHeight > bc.Length() {
-				logger.Info("sync: peer has longer chain", 
-					"peer", bestPeer.String()[:8], 
-					"peer_height", maxHeight, 
-					"local_height", bc.Length())
-				server.RequestSync()
-			}
-		}
-	}
-}
-
-func statsTask(ctx context.Context, bc *blockchain.Blockchain, server *p2p.Server) {
-	ticker := time.NewTicker(StatsInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			peers := server.GetPeers()
-			lastBlock := bc.GetLastBlock()
-			logger.Info("stats update",
-				"height", bc.Length(),
-				"peers", len(peers),
-				"last_hash", lastBlock.Hash[:8])
-		}
-	}
-}
-
 func main() {
 	initLogger()
 	logger.Info("starting sbc daemon")
@@ -220,7 +142,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	startMaintenance(ctx, bc, server)
+	server.StartMaintenance(ctx)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)

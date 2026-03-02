@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"KitsuneSemCalda/SBC/internal/blockchain"
@@ -41,7 +42,18 @@ func init() {
 
 		time.Sleep(100 * time.Millisecond) // Give servers time to start
 
-		addrA := serverA.GetAddrs()[0].String() + "/p2p/" + serverA.GetHostID()
+		var localAddr string
+		for _, addr := range serverA.GetAddrs() {
+			if strings.Contains(addr.String(), "/127.0.0.1/") {
+				localAddr = addr.String()
+				break
+			}
+		}
+		if localAddr == "" {
+			localAddr = serverA.GetAddrs()[0].String()
+		}
+
+		addrA := localAddr + "/p2p/" + serverA.GetHostID()
 		err = serverB.ConnectToPeer(addrA)
 		t.Expect(err).ToBeNil()
 

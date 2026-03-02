@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +40,23 @@ type Host struct {
 	cbMutex   sync.RWMutex
 	mdns      mdns.Service
 	dht       *dht.IpfsDHT
+	publicIP  string
+}
+
+func GetPublicIP() (string, error) {
+	client := http.Client{
+		Timeout: 5 * time.Second,
+	}
+	resp, err := client.Get("https://api.ipify.org")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	ip, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	return string(ip), nil
 }
 
 // HandlePeerFound implements the mdns.Notifee interface
@@ -46,6 +66,7 @@ func (h *Host) HandlePeerFound(pi peer.AddrInfo) {
 	h.cbMutex.RUnlock()
 
 	if cb != nil {
+		Debug("Discovery", "Discovered peer: %s", pi.ID)
 		cb.OnPeerFound(pi)
 	}
 }
@@ -63,17 +84,21 @@ func startUDPBroadcast(cfg *Config, h *Host, getAddrs func() []multiaddr.Multiad
 
 	addr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("255.255.255.255:%d", cfg.DiscoveryPort))
 	if err != nil {
-		fmt.Printf("[UDP] Error: failed to resolve broadcast address: %v\n", err)
+		Error("UDP", "Failed to resolve broadcast address: %v", err)
 		return
 	}
 
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: cfg.DiscoveryPort})
 	if err != nil {
-		fmt.Printf("[UDP] Warning: cannot listen on UDP %d: %v. Discovery only mode.\n", cfg.DiscoveryPort, err)
+		if strings.Contains(err.Error(), "address already in use") {
+			Debug("UDP", "Port %d already in use, skipping broadcast listener", cfg.DiscoveryPort)
+		} else {
+			Warn("UDP", "Cannot listen on UDP %d: %v. Discovery only mode.", cfg.DiscoveryPort, err)
+		}
 		return
 	}
 
-	fmt.Printf("[UDP] Discovery broadcast listening on :%d\n", cfg.DiscoveryPort)
+	Debug("UDP", "Discovery broadcast listening on :%d", cfg.DiscoveryPort)
 
 	go func() {
 		defer conn.Close()
@@ -112,7 +137,7 @@ func startUDPBroadcast(cfg *Config, h *Host, getAddrs func() []multiaddr.Multiad
 						ID:    peerID,
 						Addrs: addrs,
 					}
-					fmt.Printf("[UDP] Discovered peer: %s from %s\n", peerID, remoteAddr.IP)
+					Debug("UDP", "Discovered peer: %s from %s", peerID, remoteAddr.IP)
 					h.HandlePeerFound(pi)
 				}
 			}
@@ -181,7 +206,7 @@ func (h *Host) startDHT(ctx context.Context) error {
 			if err := h.host.Connect(ctx, pi); err != nil {
 				// Silently fail for default bootstrap nodes to avoid log noise
 			} else {
-				fmt.Printf("[DHT] Connected to bootstrap node %s\n", pi.ID)
+				Debug("DHT", "Connected to bootstrap node %s", pi.ID)
 			}
 		}(*pi)
 	}
@@ -201,7 +226,7 @@ func (h *Host) startDHT(ctx context.Context) error {
 			case <-ticker.C:
 				peers, err := routingDiscovery.FindPeers(ctx, h.config.Rendezvous)
 				if err != nil {
-					fmt.Printf("[DHT] Error finding peers: %v\n", err)
+					Debug("DHT", "Error finding peers: %v", err)
 					continue
 				}
 
@@ -219,33 +244,43 @@ func (h *Host) startDHT(ctx context.Context) error {
 }
 
 func NewHost(cfg *Config, cb HostCallbacks) (*Host, error) {
-	h, err := libp2p.New(
+	// Enable Relay and AutoRelay
+	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings(cfg.ListenAddr),
-		libp2p.DisableRelay(),
-	)
+		libp2p.EnableRelay(),
+		libp2p.EnableHolePunching(),
+	}
+
+	h, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create host: %w", err)
 	}
 	pingService := ping.NewPingService(h)
+
+	publicIP, _ := GetPublicIP()
+	if publicIP != "" {
+		Debug("Host", "Public IP detected: %s", publicIP)
+	}
 
 	host := &Host{
 		host:      h,
 		ping:      pingService,
 		config:    cfg,
 		callbacks: cb,
+		publicIP:  publicIP,
 	}
 
 	if cfg.EnableMDNS {
 		// Use 'host' itself as the notifee
 		mdnsService := mdns.NewMdnsService(h, "sbc-p2p", host)
 		if mdnsService == nil {
-			fmt.Println("[mDNS] Warning: mDNS discovery not available")
+			Warn("mDNS", "Discovery not available")
 		} else {
 			if err := mdnsService.Start(); err != nil {
-				fmt.Printf("[mDNS] Error starting discovery service: %v\n", err)
+				Error("mDNS", "Error starting discovery service: %v", err)
 			} else {
 				host.mdns = mdnsService
-				fmt.Println("[mDNS] Discovery service started")
+				Debug("mDNS", "Discovery service started")
 			}
 		}
 	}
@@ -256,9 +291,9 @@ func NewHost(cfg *Config, cb HostCallbacks) (*Host, error) {
 
 	if cfg.EnableDHT {
 		if err := host.startDHT(context.Background()); err != nil {
-			fmt.Printf("[DHT] Error starting DHT: %v\n", err)
+			Error("DHT", "Error starting DHT: %v", err)
 		} else {
-			fmt.Println("[DHT] Discovery service started")
+			Debug("DHT", "Discovery service started")
 		}
 	}
 
@@ -276,7 +311,29 @@ func (h *Host) ID() peer.ID {
 }
 
 func (h *Host) Addrs() []multiaddr.Multiaddr {
-	return h.host.Addrs()
+	addrs := h.host.Addrs()
+	if h.publicIP == "" {
+		return addrs
+	}
+
+	// Logic to construct public multiaddrs based on local port
+	var publicAddrs []multiaddr.Multiaddr
+	for _, addr := range addrs {
+		addrStr := addr.String()
+		if strings.Contains(addrStr, "/tcp/") {
+			parts := strings.Split(addrStr, "/tcp/")
+			if len(parts) > 1 {
+				port := parts[1]
+				pubMa, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%s", h.publicIP, port))
+				if err == nil {
+					publicAddrs = append(publicAddrs, pubMa)
+				}
+			}
+		}
+	}
+
+	// Prepend public addresses to be more visible
+	return append(publicAddrs, addrs...)
 }
 
 func (h *Host) Connect(ctx context.Context, addr multiaddr.Multiaddr) error {

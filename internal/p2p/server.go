@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -20,6 +19,8 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
+const FailedPeerCooldown = 10 * time.Minute
+
 type Server struct {
 	host       *Host
 	blockchain *blockchain.Blockchain
@@ -32,6 +33,9 @@ type Server struct {
 
 	processedMutex  sync.RWMutex
 	processedBlocks map[string]time.Time
+
+	failedPeers   map[string]time.Time
+	failedPeersMu sync.RWMutex
 }
 
 func NewServer(cfg *Config, bc *blockchain.Blockchain) (*Server, error) {
@@ -40,6 +44,7 @@ func NewServer(cfg *Config, bc *blockchain.Blockchain) (*Server, error) {
 		peers:           make(map[peer.ID]*Peer),
 		config:          cfg,
 		processedBlocks: make(map[string]time.Time),
+		failedPeers:     make(map[string]time.Time),
 	}
 
 	host, err := NewHost(cfg, s)
@@ -67,8 +72,63 @@ func NewServer(cfg *Config, bc *blockchain.Blockchain) (*Server, error) {
 	})
 
 	go s.cleanupProcessedBlocks()
+	go s.cleanupFailedPeers()
 
 	return s, nil
+}
+
+func (s *Server) cleanupFailedPeers() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		s.failedPeersMu.Lock()
+		for addr, timestamp := range s.failedPeers {
+			if now.Sub(timestamp) > FailedPeerCooldown {
+				delete(s.failedPeers, addr)
+			}
+		}
+		s.failedPeersMu.Unlock()
+	}
+}
+
+func (s *Server) StartMaintenance(ctx context.Context) {
+	go s.syncTask(ctx)
+	go s.periodicPeerDiscovery()
+}
+
+func (s *Server) syncTask(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			peers := s.GetPeers()
+			if len(peers) == 0 {
+				continue
+			}
+
+			var maxHeight int
+			var bestPeer peer.ID
+			for pID, p := range peers {
+				if p.BestHeight > maxHeight {
+					maxHeight = p.BestHeight
+					bestPeer = pID
+				}
+			}
+
+			if maxHeight > s.blockchain.Length() {
+				Debug("Sync", "Peer has longer chain, requesting blocks")
+				msg, _ := NewMessage(MsgGetBlocks, GetBlocksPayload{StartHash: s.blockchain.GetLastBlock().Hash})
+				if p, ok := peers[bestPeer]; ok {
+					p.SendMessage(msg)
+				}
+			}
+		}
+	}
 }
 
 func (s *Server) cleanupProcessedBlocks() {
@@ -133,14 +193,14 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 	case MsgVersion:
 		var payload VersionPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			log.Printf("Error unmarshaling version: %v", err)
+			Debug("P2P", "Error unmarshaling version: %v", err)
 			return
 		}
 		p.BestHeight = payload.BestHeight
 		verAck, _ := NewMessage(MsgVerAck, VerAckPayload{Accept: true})
 		p.SendMessage(verAck)
 	case MsgVerAck:
-		log.Printf("Handshake completo com peer: %s", p.ID)
+		Debug("P2P", "Handshake complete with %s", p.ID)
 		if p.BestHeight > s.blockchain.Length() {
 			s.sendGetBlocks(p)
 		}
@@ -160,7 +220,6 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 			PrevHash:  payload.PrevHash,
 		}
 
-		// Avoid processing if already handled
 		s.processedMutex.RLock()
 		if !s.processedBlocks[block.Hash].IsZero() {
 			s.processedMutex.RUnlock()
@@ -179,7 +238,6 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 	case MsgGetBlocks:
 		var payload GetBlocksPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			log.Printf("Error unmarshaling getblocks: %v", err)
 			return
 		}
 
@@ -196,7 +254,6 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 	case MsgInv:
 		var payload InvPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			log.Printf("Error unmarshaling inv: %v", err)
 			return
 		}
 
@@ -219,7 +276,6 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 	case MsgGetData:
 		var payload InvPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			log.Printf("Error unmarshaling getdata: %v", err)
 			return
 		}
 
@@ -251,35 +307,17 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 	case MsgPeers:
 		var payload PeersPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			log.Printf("Error unmarshaling peers: %v", err)
 			return
 		}
 		for _, addr := range payload.Peers {
 			if addr == "" {
 				continue
 			}
-			ma, err := multiaddr.NewMultiaddr(addr)
-			if err != nil {
-				continue
-			}
-			pi, err := peer.AddrInfoFromP2pAddr(ma)
-			if err != nil {
-				continue
-			}
-			ctx := context.Background()
-			if err := s.host.Connect(ctx, ma); err != nil {
-				continue
-			}
-			stream, err := s.host.NewStream(ctx, pi.ID)
-			if err != nil {
-				continue
-			}
-			s.handleStream(stream)
+			s.ConnectToPeer(addr)
 		}
 	case MsgFindBlock:
 		var payload FindBlockPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			log.Printf("Error unmarshaling findblock: %v", err)
 			return
 		}
 		block := s.blockchain.GetBlockByHash(payload.Hash)
@@ -300,7 +338,6 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 	case MsgBlockFound:
 		var payload BlockFoundPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			log.Printf("Error unmarshaling blockfound: %v", err)
 			return
 		}
 		if payload.Found && payload.Block != nil {
@@ -312,7 +349,7 @@ func (s *Server) handleMessage(p *Peer, msg *Message) {
 				PrevHash:  payload.Block.PrevHash,
 			}
 			s.blockchain.ProcessBlock(block)
-			log.Printf("[FIND] Block #%d found!", block.Index)
+			Debug("Discovery", "Block #%d found via network", block.Index)
 		}
 	}
 }
@@ -395,12 +432,10 @@ func (s *Server) HandlePeerFound(pi peer.AddrInfo) {
 	defer cancel()
 
 	if err := s.host.ConnectPeer(ctx, pi); err != nil {
-		fmt.Printf("[P2P] Failed to connect to %s: %v\n", pi.ID, err)
 		return
 	}
 	stream, err := s.host.NewStream(ctx, pi.ID)
 	if err != nil {
-		fmt.Printf("[P2P] Failed to open stream to %s: %v\n", pi.ID, err)
 		return
 	}
 	s.handleStream(stream)
@@ -410,7 +445,27 @@ func (s *Server) OnPeerFound(pi peer.AddrInfo) {
 	s.HandlePeerFound(pi)
 }
 
+func (s *Server) isFailed(addr string) bool {
+	s.failedPeersMu.RLock()
+	defer s.failedPeersMu.RUnlock()
+	lastFailed, exists := s.failedPeers[addr]
+	if !exists {
+		return false
+	}
+	return time.Since(lastFailed) < FailedPeerCooldown
+}
+
+func (s *Server) markFailed(addr string) {
+	s.failedPeersMu.Lock()
+	defer s.failedPeersMu.Unlock()
+	s.failedPeers[addr] = time.Now()
+}
+
 func (s *Server) ConnectToPeer(addr string) error {
+	if s.isFailed(addr) {
+		return nil
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -419,8 +474,8 @@ func (s *Server) ConnectToPeer(addr string) error {
 		return err
 	}
 
-	err = s.host.Connect(ctx, ma)
-	if err != nil {
+	if err := s.host.Connect(ctx, ma); err != nil {
+		s.markFailed(addr)
 		return err
 	}
 
@@ -431,6 +486,7 @@ func (s *Server) ConnectToPeer(addr string) error {
 
 	stream, err := s.host.NewStream(ctx, pi.ID)
 	if err != nil {
+		s.markFailed(addr)
 		return err
 	}
 
@@ -522,33 +578,32 @@ func (s *Server) connectToBootNodes() {
 			continue
 		}
 
-		fmt.Printf("[BOOT] Trying to connect to bootnode: %s\n", addr)
+		if s.isFailed(addr) {
+			continue
+		}
 
 		ma, err := multiaddr.NewMultiaddr(addr)
 		if err != nil {
-			fmt.Printf("[BOOT] Invalid multiaddr %s: %v\n", addr, err)
 			continue
 		}
 
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := s.host.Connect(ctx, ma); err != nil {
-			fmt.Printf("[BOOT] Could not connect to %s: %v\n", addr, err)
+			cancel()
+			s.markFailed(addr)
 			continue
 		}
+		cancel()
 
-		pi, err := peer.AddrInfoFromP2pAddr(ma)
+		pi, _ := peer.AddrInfoFromP2pAddr(ma)
+		stream, err := s.host.NewStream(context.Background(), pi.ID)
 		if err != nil {
-			continue
-		}
-
-		stream, err := s.host.NewStream(ctx, pi.ID)
-		if err != nil {
-			fmt.Printf("[BOOT] Could not open stream to %s: %v\n", addr, err)
+			s.markFailed(addr)
 			continue
 		}
 
 		s.handleStream(stream)
-		fmt.Printf("[BOOT] Connected to bootnode: %s\n", addr)
+		Info("BOOT", "Connected to bootnode: %s", addr)
 	}
 }
 
@@ -559,7 +614,7 @@ func (s *Server) periodicPeerDiscovery() {
 	for {
 		<-ticker.C
 		if len(s.peers) > 0 {
-			fmt.Printf("[DISCOVERY] Periodic peer discovery (connected peers: %d)\n", len(s.peers))
+			Debug("Discovery", "Periodic peer discovery (connected peers: %d)", len(s.peers))
 			s.DiscoverPeers()
 		}
 	}
@@ -583,6 +638,10 @@ func (s *Server) tryLocalDiscovery() {
 	if daemon.Addr != "" && daemon.PeerID != "" {
 		daemonAddr := daemon.Addr + "/p2p/" + daemon.PeerID
 
+		if s.isFailed(daemonAddr) {
+			return
+		}
+
 		localIP := s.getLocalIP()
 		if localIP != "" {
 			daemonAddr = strings.Replace(daemonAddr, "/ip4/0.0.0.0/", "/ip4/"+localIP+"/", 1)
@@ -591,14 +650,18 @@ func (s *Server) tryLocalDiscovery() {
 
 		ma, err := multiaddr.NewMultiaddr(daemonAddr)
 		if err == nil {
-			ctx := context.Background()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := s.host.Connect(ctx, ma); err == nil {
+				cancel()
 				pi, _ := peer.AddrInfoFromP2pAddr(ma)
-				if stream, err := s.host.NewStream(ctx, pi.ID); err == nil {
+				if stream, err := s.host.NewStream(context.Background(), pi.ID); err == nil {
 					s.handleStream(stream)
-					fmt.Printf("[AUTO] Connected to local daemon: %s\n", daemonAddr)
+					Info("AUTO", "Connected to local daemon: %s", daemonAddr)
 					return
 				}
+			} else {
+				cancel()
+				s.markFailed(daemonAddr)
 			}
 		}
 	}
@@ -625,36 +688,39 @@ func (s *Server) resolveDNSSeeds(dnsSeed string) {
 			continue
 		}
 
-		fmt.Printf("[DNS] Resolving seed: %s\n", seed)
-
 		ips, err := net.LookupIP(seed)
 		if err != nil {
-			fmt.Printf("[DNS] Failed to resolve %s: %v\n", seed, err)
 			continue
 		}
 
 		for _, ip := range ips {
 			addr := fmt.Sprintf("/ip4/%s/tcp/8333", ip.String())
+			if s.isFailed(addr) {
+				continue
+			}
+
 			ma, err := multiaddr.NewMultiaddr(addr)
 			if err != nil {
 				continue
 			}
 
-			ctx := context.Background()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := s.host.Connect(ctx, ma); err != nil {
-				fmt.Printf("[DNS] Could not connect to %s: %v\n", addr, err)
+				cancel()
+				s.markFailed(addr)
 				continue
 			}
+			cancel()
 
 			pi, _ := peer.AddrInfoFromP2pAddr(ma)
-			stream, err := s.host.NewStream(ctx, pi.ID)
+			stream, err := s.host.NewStream(context.Background(), pi.ID)
 			if err != nil {
-				fmt.Printf("[DNS] Could not open stream to %s: %v\n", addr, err)
+				s.markFailed(addr)
 				continue
 			}
 
 			s.handleStream(stream)
-			fmt.Printf("[DNS] Connected to bootstrap node: %s\n", addr)
+			Info("DNS", "Connected to bootstrap node: %s", addr)
 			return
 		}
 	}
@@ -663,7 +729,6 @@ func (s *Server) resolveDNSSeeds(dnsSeed string) {
 func (s *Server) fetchSeedsFromHTTP(seedURL string) {
 	resp, err := http.Get(seedURL)
 	if err != nil {
-		fmt.Printf("[HTTP SEED] Failed to fetch %s: %v\n", seedURL, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -675,19 +740,11 @@ func (s *Server) fetchSeedsFromHTTP(seedURL string) {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		fmt.Printf("[HTTP SEED] Failed to decode response: %v\n", err)
 		return
 	}
-
-	if len(result.Peers) == 0 {
-		fmt.Printf("[HTTP SEED] No peers found at %s\n", seedURL)
-		return
-	}
-
-	fmt.Printf("[HTTP SEED] Found %d peers from %s\n", len(result.Peers), seedURL)
 
 	for _, p := range result.Peers {
-		if p.Addr == "" {
+		if p.Addr == "" || s.isFailed(p.Addr) {
 			continue
 		}
 
@@ -696,19 +753,23 @@ func (s *Server) fetchSeedsFromHTTP(seedURL string) {
 			continue
 		}
 
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if err := s.host.Connect(ctx, ma); err != nil {
+			cancel()
+			s.markFailed(p.Addr)
 			continue
 		}
+		cancel()
 
 		pi, _ := peer.AddrInfoFromP2pAddr(ma)
-		stream, err := s.host.NewStream(ctx, pi.ID)
+		stream, err := s.host.NewStream(context.Background(), pi.ID)
 		if err != nil {
+			s.markFailed(p.Addr)
 			continue
 		}
 
 		s.handleStream(stream)
-		fmt.Printf("[HTTP SEED] Connected to peer: %s\n", p.Addr)
+		Info("HTTP", "Connected to peer: %s", p.Addr)
 		return
 	}
 }
